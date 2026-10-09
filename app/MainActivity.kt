@@ -6,6 +6,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
@@ -14,8 +15,10 @@ import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Bundle
+import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
 import android.speech.RecognitionListener
@@ -145,8 +148,22 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var ttsReady = false
     private var recognizer: SpeechRecognizer? = null
     private val reqMic = 101
+    private val reqPickContact = 202
+    private var pendingAlias: String? = null
+
+    private val prefs: SharedPreferences by lazy {
+        getSharedPreferences("jarvis", Context.MODE_PRIVATE)
+    }
+
+    // Words that mean each saved contact
+    private val aliasWords = mapOf(
+        "father" to setOf("father", "papa", "dad", "daddy", "pita", "पापा", "पिता", "डैड"),
+        "mother" to setOf("mother", "mummy", "mom", "maa", "mamma", "मम्मी", "माँ", "मां", "मॉम")
+    )
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun label(alias: String): String = alias.replaceFirstChar { it.uppercase() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -158,6 +175,19 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     // ---------------------------------------------------------------- UI
+
+    private fun makeChip(text: String, alias: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 13f
+        setTextColor(Color.parseColor("#80DEEA"))
+        setPadding(dp(14), dp(8), dp(14), dp(8))
+        background = GradientDrawable().apply {
+            cornerRadius = dp(18).toFloat()
+            setColor(Color.parseColor("#0A1A33"))
+            setStroke(dp(1), Color.parseColor("#1E88E5"))
+        }
+        setOnClickListener { replyText.text = chooseContact(alias) }
+    }
 
     private fun buildUi(): View {
         val root = LinearLayout(this).apply {
@@ -220,6 +250,26 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         )
 
+        val chips = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        chips.addView(makeChip("Set Father", "father"))
+        chips.addView(
+            makeChip("Set Mother", "mother"),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { leftMargin = dp(12) }
+        )
+        root.addView(
+            chips,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+        )
+
         micButton = TextView(this).apply {
             text = "\uD83C\uDF99"
             textSize = 32f
@@ -257,6 +307,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         heardText.text = "You: $heard"
         replyText.text = reply
         historyText.append("You: $heard\nJARVIS: $reply\n\n")
+        historyScroll.post { historyScroll.fullScroll(View.FOCUS_DOWN) }
+        speak(reply)
+    }
+
+    private fun say(reply: String) {
+        replyText.text = reply
+        historyText.append("JARVIS: $reply\n\n")
         historyScroll.post { historyScroll.fullScroll(View.FOCUS_DOWN) }
         speak(reply)
     }
@@ -382,6 +439,84 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
+    // ---------------------------------------------------------------- Contacts and calling
+
+    private fun findAlias(text: String): String? {
+        val words = text.split(" ").toSet()
+        return aliasWords.entries.firstOrNull { e -> e.value.any { it in words } }?.key
+    }
+
+    private fun chooseContact(alias: String): String {
+        pendingAlias = alias
+        return try {
+            startActivityForResult(
+                Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI),
+                reqPickContact
+            )
+            "Please choose the contact for ${label(alias)}, sir."
+        } catch (e: Exception) {
+            "I could not open your contacts, sir."
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != reqPickContact) return
+        val alias = pendingAlias
+        pendingAlias = null
+        val uri = data?.data
+        if (resultCode != RESULT_OK || alias == null || uri == null) {
+            replyText.text = "No contact was selected, sir."
+            return
+        }
+        var name = label(alias)
+        var number = ""
+        contentResolver.query(
+            uri,
+            arrayOf(
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER
+            ),
+            null, null, null
+        )?.use { c ->
+            if (c.moveToFirst()) {
+                name = c.getString(0) ?: name
+                number = c.getString(1) ?: ""
+            }
+        }
+        val cleaned = number.filter { it.isDigit() || it == '+' }
+        if (cleaned.isEmpty()) {
+            say("I could not read a phone number for that contact, sir.")
+            return
+        }
+        prefs.edit().putString("contact_$alias", "$name|$cleaned").apply()
+        say("Saved $name as your ${label(alias)}, sir.")
+    }
+
+    private fun confirmCall(alias: String): String {
+        val saved = prefs.getString("contact_$alias", null)
+            ?: return "No ${label(alias)} contact is saved yet, sir. Tap Set ${label(alias)} below and choose the contact."
+        val idx = saved.indexOf('|')
+        val name = if (idx > 0) saved.substring(0, idx) else label(alias)
+        val number = if (idx > 0) saved.substring(idx + 1) else saved
+        AlertDialog.Builder(this)
+            .setTitle("Call $name?")
+            .setMessage("${label(alias)}: $number")
+            .setPositiveButton("Open dialer") { _, _ -> openDialer(number) }
+            .setNegativeButton("Cancel", null)
+            .show()
+        return "Do you want me to call $name, sir? Please confirm on the screen."
+    }
+
+    private fun openDialer(number: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", number, null)))
+        } catch (e: Exception) {
+            replyText.text = "I could not open the dialer, sir."
+        }
+    }
+
     // ---------------------------------------------------------------- Local command router
 
     private fun has(text: String, vararg words: String): Boolean = words.any { text.contains(it) }
@@ -398,69 +533,4 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             "खोलो", "खोल", "चालू", "चलाओ"
         )
         val whatsapp = has(text, "whatsapp", "whats app", "व्हाट्सएप", "व्हाट्सऐप", "वॉट्सएप", "व्हाट्सअप")
-        val youtube = has(text, "youtube", "you tube", "यूट्यूब", "यूटयूब")
-        val camera = has(text, "camera", "कैमरा")
-        val settings = has(text, "settings", "setting", "सेटिंग")
-
-        // Messaging / calling are added in later stages
-        if (whatsapp && has(text, "message", "msg", "send", "bhej", "मैसेज", "भेज")) {
-            return "WhatsApp messaging will be added in Stage 6, sir."
-        }
-        if (has(text, "call", "phone laga", "dial", "कॉल", "फोन लगा")) {
-            return "Calling will be added in Stage 5, sir."
-        }
-
-        if (has(text, "battery", "बैटरी", "charge")) {
-            val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-            val pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-            return "Your battery level is $pct percent."
-        }
-        if (has(text, "time", "samay", "waqt", "baje", "टाइम", "समय", "वक्त", "बजे")) {
-            val now = SimpleDateFormat("h:mm a", Locale.ENGLISH).format(Date())
-            return "The time is $now, sir."
-        }
-
-        if (whatsapp && (openWord || text.length <= 12)) return launchPackage("com.whatsapp", "WhatsApp")
-        if (youtube && (openWord || text.length <= 12)) return launchPackage("com.google.android.youtube", "YouTube")
-        if (camera && (openWord || text.length <= 12)) {
-            return try {
-                startActivity(Intent(MediaStore.ACTION_IMAGE_CAPTURE))
-                "Opening the camera, sir."
-            } catch (e: Exception) {
-                "I could not open the camera, sir."
-            }
-        }
-        if (settings && (openWord || text.length <= 12)) {
-            return try {
-                startActivity(Intent(Settings.ACTION_SETTINGS))
-                "Opening settings, sir."
-            } catch (e: Exception) {
-                "I could not open settings, sir."
-            }
-        }
-
-        if (has(text, "help", "what can you do", "madad")) {
-            return "I can open WhatsApp, YouTube, camera and settings, and tell you the time and battery level."
-        }
-
-        return "I am not sure about that yet, sir. General conversation arrives in Stage 7."
-    }
-
-    private fun launchPackage(pkg: String, label: String): String {
-        val intent = packageManager.getLaunchIntentForPackage(pkg)
-            ?: return "$label does not appear to be installed, sir."
-        return try {
-            startActivity(intent)
-            "Opening $label, sir."
-        } catch (e: Exception) {
-            "I could not open $label, sir."
-        }
-    }
-
-    override fun onDestroy() {
-        recognizer?.destroy()
-        tts?.stop()
-        tts?.shutdown()
-        super.onDestroy()
-    }
-}
+        val youtube 
