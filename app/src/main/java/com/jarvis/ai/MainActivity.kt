@@ -533,4 +533,84 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             "खोलो", "खोल", "चालू", "चलाओ"
         )
         val whatsapp = has(text, "whatsapp", "whats app", "व्हाट्सएप", "व्हाट्सऐप", "वॉट्सएप", "व्हाट्सअप")
-        val youtube
+        val youtube = has(text, "youtube", "you tube", "यूट्यूब", "यूटयूब")
+        val camera = has(text, "camera", "कैमरा")
+        val settings = has(text, "settings", "setting", "सेटिंग")
+
+        val alias = findAlias(text)
+
+        // Choose which contact is Father / Mother
+        val wantsSet = has(text, "set ", "save", "change", "badlo", "choose", "select", "chuno", "सेट", "बदल") &&
+            has(text, "contact", "number", "नंबर", "कॉन्टैक्ट")
+        if (alias != null && wantsSet) {
+            return chooseContact(alias)
+        }
+
+        // WhatsApp messaging is added in Stage 6
+        if (whatsapp && has(text, "message", "msg", "send", "bhej", "मैसेज", "भेज")) {
+            return "WhatsApp messaging will be added in Stage 6, sir."
+        }
+
+        // Calling: only saved contacts, always confirmed on screen, opens the dialer
+        if (has(text, "call", "dial", "phone laga", "phone kar", "कॉल", "फोन लगा", "फोन कर")) {
+            return if (alias != null) {
+                confirmCall(alias)
+            } else {
+                "For now I can only call your saved Father or Mother, sir."
+            }
+        }
+
+        if (has(text, "battery", "बैटरी", "charge")) {
+            val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+            val pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            return "Your battery level is $pct percent."
+        }
+        if (has(text, "time", "samay", "waqt", "baje", "टाइम", "समय", "वक्त", "बजे")) {
+            val now = SimpleDateFormat("h:mm a", Locale.ENGLISH).format(Date())
+            return "The time is $now, sir."
+        }
+
+        if (whatsapp && (openWord || text.length <= 12)) return launchPackage("com.whatsapp", "WhatsApp")
+        if (youtube && (openWord || text.length <= 12)) return launchPackage("com.google.android.youtube", "YouTube")
+        if (camera && (openWord || text.length <= 12)) {
+            return try {
+                startActivity(Intent(MediaStore.ACTION_IMAGE_CAPTURE))
+                "Opening the camera, sir."
+            } catch (e: Exception) {
+                "I could not open the camera, sir."
+            }
+        }
+        if (settings && (openWord || text.length <= 12)) {
+            return try {
+                startActivity(Intent(Settings.ACTION_SETTINGS))
+                "Opening settings, sir."
+            } catch (e: Exception) {
+                "I could not open settings, sir."
+            }
+        }
+
+        if (has(text, "help", "what can you do", "madad")) {
+            return "I can open WhatsApp, YouTube, camera and settings, tell you the time and battery level, and open the dialer for your saved Father or Mother."
+        }
+
+        return "I am not sure about that yet, sir. General conversation arrives in Stage 7."
+    }
+
+    private fun launchPackage(pkg: String, label: String): String {
+        val intent = packageManager.getLaunchIntentForPackage(pkg)
+            ?: return "$label does not appear to be installed, sir."
+        return try {
+            startActivity(intent)
+            "Opening $label, sir."
+        } catch (e: Exception) {
+            "I could not open $label, sir."
+        }
+    }
+
+    override fun onDestroy() {
+        recognizer?.destroy()
+        tts?.stop()
+        tts?.shutdown()
+        super.onDestroy()
+    }
+}
